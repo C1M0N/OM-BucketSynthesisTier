@@ -7,7 +7,7 @@ __pycache__/
 *.pyc
 
 # 运行期临时备份（results.json 的快照备份，无需入库）
-engine/cache/results.json.bak_realmfree
+engine/cache/*.bak*
 
 # 本地运行日志（实际写在 %LOCALAPPDATA%\osu4k\logs，这里仅防御性忽略）
 engine/logs/

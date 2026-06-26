@@ -45,7 +45,7 @@ let n = 0;
 for (const it of items) {
   n += 1;
   const rec = { md5: it.md5, ok: false, mode: null, cs: null, msd: null, isr: null, rsr: null,
-                lnRatio: null, columnCount: null, holds: 0, total: 0, err: null };
+                msdSkills: null, lnRatio: null, columnCount: null, holds: 0, total: 0, err: null };
   let osu;
   try { osu = readFileSync(it.path, "utf8"); }
   catch (e) { rec.err = "read:" + e.message; out.push(rec); continue; }
@@ -56,7 +56,7 @@ for (const it of items) {
   try { const r = reworkCalc(osu, 1.0, null, null); rec.rsr = Array.isArray(r) ? r[0] : (r?.star ?? r);
         if (Array.isArray(r)) { rec.lnRatio = r[1]; rec.columnCount = r[2]; } } catch (e) { rec.err = "rsr:" + e.message; }
   try { rec.isr = await calculateInterludeStar(osu, 1.0, null); } catch (e) { rec.err = (rec.err||"") + " isr:" + e.message; }
-  try { rec.msd = (await msd(osu, 1.0)).Overall; } catch (e) { rec.err = (rec.err||"") + " msd:" + e.message; }
+  try { const M = await msd(osu, 1.0); rec.msd = M.Overall; rec.msdSkills = M; } catch (e) { rec.err = (rec.err||"") + " msd:" + e.message; }
   rec.ok = (rec.msd != null && rec.isr != null && rec.rsr != null);
   out.push(rec);
   if (n % 25 === 0) { writeFileSync(outPath, JSON.stringify(out)); process.stderr.write(`  [${n}/${items.length}]\n`); }
