@@ -41,6 +41,8 @@ from datetime import datetime, timezone
 # 路径与常量
 # ----------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+import bstv2  # BSTv2 [4k] 命名解析
 DEFAULT_INPUT = os.path.join(_HERE, "report_data.json")
 DEFAULT_OUTPUT = os.path.join(_HERE, "report.pdf")
 
@@ -420,6 +422,7 @@ def tex_escape(s):
         "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#",
         "_": r"\_", "{": r"\{", "}": r"\}",
         "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+        "[": "{[}", "]": "{]}",   # 防止行首 [4k] 被当作 \\ 的可选行距参数
     }
     for k, v in repl.items():
         s = s.replace(k, v)
@@ -457,7 +460,7 @@ def build_tex(data, fig_paths):
     # CHANGE 1: 解析桶名 "4k-XX.X" -> float，升序排列（4k-00.0, 4k-01.5, ...）。
     def _bucket_diff(c):
         try:
-            return float(str(c["name"]).split("-")[1])
+            return bstv2.name_value(str(c["name"]))
         except Exception:
             return float("inf")
     changes = [c for c in s.get("bucketChanges", []) if int(c.get("delta", 0)) != 0]

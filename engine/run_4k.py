@@ -35,6 +35,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import realm_engine
 import osu_meta
+import bstv2          # BSTv2 融合定级 + [4k] 命名 + 冻结参数
+import mapminus       # Map Minus (MM) 本地移植
 
 # Session-portable: derive everything from this script's own location.
 # HERE = <mnt>/12_osu/4k_classification/engine ; OSU_DIR = <mnt>/12_osu
@@ -222,9 +224,14 @@ def main():
             meta = osu_meta.parse_file(w["path"])
             base, scaled = composite(msd, isr, rsr, lnr)
             b = bucket_of(scaled)
+            try:
+                _mm = mapminus.compute(open(w["path"], encoding="utf-8", errors="replace").read())["rating"]
+            except Exception:
+                _mm = None
             results[m] = {
                 "status": "ok", "sr": sr if sr is not None else 0.0,
                 "msd": msd, "isr": isr, "rsr": rsr,
+                "mm": _mm, "skills": r.get("msdSkills"),
                 "scaled": scaled, "bucket": b,
                 "lnr": lnr, "type": meta["type"],
                 "title": r.get("title", ""), "version": r.get("version", ""),
@@ -266,10 +273,23 @@ def main():
             v["lnr"] = lnr; v["type"] = typ
         base, scaled = composite(v["msd"], v["isr"], v["rsr"], lnr)
         v["scaled"] = scaled
-        v["bucket"] = bucket_of(scaled)
+        # BSTv2: ensure MM (Map Minus overall) then fuse 0.4*z(BST)+0.6*z(MM)
+        if v.get("mm") is None:
+            sha = md5_to_sha.get(m)
+            if sha and os.path.exists(sha_path(sha)):
+                try:
+                    v["mm"] = mapminus.compute(open(sha_path(sha), encoding="utf-8", errors="replace").read())["rating"]
+                except Exception:
+                    v["mm"] = None
+        if v.get("mm") is not None:
+            v["bstv2"] = bstv2.bstv2(scaled, v["mm"])
+            v["bucket"] = bstv2.bucket_of(v["bstv2"])
+        else:
+            v["bstv2"] = scaled            # no MM (deleted-map remnant) -> fall back to BST scale
+            v["bucket"] = bucket_of(scaled)
         recomputed += 1
     json.dump(results, open(RESULTS, "w"))
-    print("[recompute] %d 4K maps rebucketed" % recomputed)
+    print("[recompute] %d 4K maps re-graded with BSTv2" % recomputed)
 
     # build bucket membership (md5 lists) from current 4K results, restricted to realm beatmaps
     realm_md5 = set(b["md5"] for b in beatmaps)
@@ -280,7 +300,7 @@ def main():
             continue
         if m not in realm_md5:
             continue
-        name = bucket_name(v["bucket"])
+        name = bstv2.bucket_name(v["bucket"])
         buckets.setdefault(name, []).append(m)
         bucket_rows.setdefault(name, []).append(v)
     total_4k = sum(len(x) for x in buckets.values())
@@ -299,7 +319,7 @@ def main():
     # collection no longer exists and the user now has others (e.g. "10SKIP"); preserving ALL
     # non-bucket collections by name is the robust generalization so none are lost on import.
     preserved = [(c["name"], c["hashes"]) for c in collections
-                 if not c["name"].startswith("4k-")]
+                 if not c["name"].startswith("4k-") and not c["name"].startswith("[4k]")]
     print("[preserve] %d manual (non-4k) collection(s): %s" % (
         len(preserved), ", ".join("%s(%d)" % (n, len(h)) for n, h in preserved) or "(none)"))
 
@@ -313,7 +333,7 @@ def main():
         print("[db] no new 4K maps this run -> collection.db NOT regenerated")
 
     # bucket changes vs the live realm's existing 4k-* collections
-    old_counts = {c["name"]: len(c["hashes"]) for c in collections if c["name"].startswith("4k-")}
+    old_counts = {c["name"]: len(c["hashes"]) for c in collections if c["name"].startswith("[4k]")}
     new_counts = {name: len(v) for name, v in buckets.items()}
     bucket_changes = []
     for name in sorted(set(old_counts) | set(new_counts)):
@@ -390,7 +410,7 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
     for b in beatmaps:
         v = results.get(b["md5"])
         if v and v.get("status") == "ok" and "scaled" in v and b.get("sha256"):
-            sha_to_map[b["sha256"]] = {"comp": v["scaled"], "typ": v.get("type") or "RC"}
+            sha_to_map[b["sha256"]] = {"comp": v.get("bstv2", v["scaled"]), "typ": v.get("type") or "RC"}
 
     # scores joined to 4K maps
     # CHANGE 0 (global): treat any score with acc < 0.80 as INVALID. Applied here at
@@ -426,7 +446,7 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
         rows = bucket_rows[name]
         cnt = len(rows)
         srs = [r["sr"] for r in rows if r.get("sr") is not None]
-        scs = [r["scaled"] for r in rows if r.get("scaled") is not None]
+        scs = [r.get("bstv2", r.get("scaled")) for r in rows if (r.get("bstv2") is not None or r.get("scaled") is not None)]
         types = {"RC": 0, "LN": 0, "HB": 0, "MIX": 0, "Vibro": 0}
         for r in rows:
             t = r.get("type") or "RC"
@@ -435,7 +455,7 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
             else:
                 types["RC"] += 1
         try:
-            b = float(name.split("-")[1])
+            b = bstv2.name_value(name)
         except Exception:
             b = None
         # collect every valid score acc whose map md5 is in this bucket
