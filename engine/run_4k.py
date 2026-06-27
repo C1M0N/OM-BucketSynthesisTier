@@ -133,6 +133,13 @@ def run_calculators(items):
 
 # ---------- main ----------
 def main():
+    # 控制台可能是 GBK(cp936)，桶名含 ℵ(U+2135) 等非 GBK 字符时直接 print 会崩；
+    # 让 stdout/stderr 对无法编码的字符容错（仅影响打印，不影响写出的 db/json）。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
     ap_max = None
     phase = "all"   # all | compute | finalize
     for a in sys.argv[1:]:
@@ -225,13 +232,14 @@ def main():
             base, scaled = composite(msd, isr, rsr, lnr)
             b = bucket_of(scaled)
             try:
-                _mm = mapminus.compute(open(w["path"], encoding="utf-8", errors="replace").read())["rating"]
+                _mmres = mapminus.compute(open(w["path"], encoding="utf-8", errors="replace").read())
+                _mm = _mmres["rating"]; _mmskills = _mmres.get("skills")
             except Exception:
-                _mm = None
+                _mm = None; _mmskills = None
             results[m] = {
                 "status": "ok", "sr": sr if sr is not None else 0.0,
                 "msd": msd, "isr": isr, "rsr": rsr,
-                "mm": _mm, "skills": r.get("msdSkills"),
+                "mm": _mm, "mmSkills": _mmskills, "skills": r.get("msdSkills"),
                 "scaled": scaled, "bucket": b,
                 "lnr": lnr, "type": meta["type"],
                 "title": r.get("title", ""), "version": r.get("version", ""),
@@ -273,14 +281,16 @@ def main():
             v["lnr"] = lnr; v["type"] = typ
         base, scaled = composite(v["msd"], v["isr"], v["rsr"], lnr)
         v["scaled"] = scaled
-        # BSTv2: ensure MM (Map Minus overall) then fuse 0.4*z(BST)+0.6*z(MM)
-        if v.get("mm") is None:
+        # BSTv2: ensure MM (Map Minus overall + 6-skill vector) then fuse 0.4*z(BST)+0.6*z(MM)
+        if v.get("mm") is None or v.get("mmSkills") is None:
             sha = md5_to_sha.get(m)
             if sha and os.path.exists(sha_path(sha)):
                 try:
-                    v["mm"] = mapminus.compute(open(sha_path(sha), encoding="utf-8", errors="replace").read())["rating"]
+                    _r = mapminus.compute(open(sha_path(sha), encoding="utf-8", errors="replace").read())
+                    v["mm"] = _r["rating"]; v["mmSkills"] = _r.get("skills")
                 except Exception:
-                    v["mm"] = None
+                    if v.get("mm") is None:
+                        v["mm"] = None
         if v.get("mm") is not None:
             v["bstv2"] = bstv2.bstv2(scaled, v["mm"])
             v["bucket"] = bstv2.bucket_of(v["bstv2"])
@@ -305,6 +315,14 @@ def main():
         bucket_rows.setdefault(name, []).append(v)
     total_4k = sum(len(x) for x in buckets.values())
     print("[buckets] %d non-empty 4K buckets, %d total 4K maps" % (len(buckets), total_4k))
+
+    # 建出完整阶梯（[4k]0 .. [4k]Z+，桶值 0.0..20.5）+ ℵ 顶档；空桶也保留为空，
+    # 让报告分布与收藏夹梯子都连续到顶。
+    ladder = [bstv2.bucket_name(i * 0.5) for i in range(0, 42)]  # 0.0 .. 20.5
+    ladder.append(bstv2.bucket_name(21.0))                       # ℵ
+    for nm in ladder:
+        buckets.setdefault(nm, [])
+        bucket_rows.setdefault(nm, [])
 
     # newMaps = 4K maps now present that were NOT in the pre-run baseline
     cur_4k = set()
@@ -382,7 +400,8 @@ def write_string(buf, s):
 
 def write_collection_db(path, buckets, preserved):
     import struct as _s
-    names = sorted([n for n in buckets if buckets[n]])   # 4k-XX.X ascending
+    # buckets 已含完整阶梯（[4k]0 .. [4k]Z+ + ℵ，空桶在内），按桶值升序写出。
+    names = sorted(buckets.keys(), key=bstv2.name_value)
     cols = [(n, buckets[n]) for n in names]
     if preserved:
         cols.extend(preserved)   # append manual (non-4k) collections after the 4k-* buckets
@@ -437,15 +456,39 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
         if m is not None:
             valid_by_md5.setdefault(m, []).append(a)
 
+    # best-per-map for the scatter: one point per 4K map = its BEST acc, sized by
+    # attempt count. Attempts count ALL plays (incl. failed/<80%) joined to the map,
+    # so heavily-retried maps render larger. Only maps whose best is valid (>=80%)
+    # are emitted (matches the chart's "real plays" axis range).
+    per_map = {}
+    for s in scores:
+        mp = sha_to_map.get(s["sha256"])
+        if not mp:
+            continue
+        a = s.get("acc")
+        if a is None:
+            continue
+        key = sha_to_md5.get(s["sha256"]) or s["sha256"]
+        d = per_map.get(key)
+        if d is None:
+            per_map[key] = {"comp": mp["comp"], "typ": mp["typ"], "acc": a, "attempts": 1}
+        else:
+            d["attempts"] += 1
+            if a > d["acc"]:
+                d["acc"] = a
+    best_scores = [d for d in per_map.values() if d["acc"] >= ACC_MIN]
+
     # buckets array
     # CHANGE 2 (data): per-bucket avgAcc = mean accuracy (0..1) of VALID scores
     # (acc>=0.80) whose map falls in that bucket. Scores join to maps by
     # sha256->md5->bucket; `buckets[name]` already holds that bucket's md5 list.
+    # MM 6-skill dimension labels (RC=米流 ST=耐力 SP=速度 LN=面条 CO=协调 PR=精准)
+    SKILL_ABBR = ["RC", "ST", "SP", "LN", "CO", "PR"]
     barr = []
     for name in sorted(buckets):
         rows = bucket_rows[name]
         cnt = len(rows)
-        srs = [r["sr"] for r in rows if r.get("sr") is not None]
+        srs = sorted([r["sr"] for r in rows if r.get("sr") is not None])
         scs = [r.get("bstv2", r.get("scaled")) for r in rows if (r.get("bstv2") is not None or r.get("scaled") is not None)]
         types = {"RC": 0, "LN": 0, "HB": 0, "MIX": 0, "Vibro": 0}
         for r in rows:
@@ -454,6 +497,33 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
                 types[t] += 1
             else:
                 types["RC"] += 1
+        # per-bucket mean of each MM skill (维度体系：每个难度桶的技能构成)
+        sk_sum = [0.0] * 6
+        sk_n = 0
+        for r in rows:
+            ms = r.get("mmSkills")
+            if ms and len(ms) >= 6:
+                for i in range(6):
+                    sk_sum[i] += ms[i]
+                sk_n += 1
+        skills_mean = {SKILL_ABBR[i]: (sk_sum[i] / sk_n if sk_n else 0.0) for i in range(6)}
+        # MinaCalc（Etterna MSD）8 技能集均值：数据已在缓存 r["skills"]，此处按桶汇总
+        msd_sum = {}
+        msd_n = 0
+        for r in rows:
+            sk = r.get("skills")
+            if isinstance(sk, dict) and sk:
+                for k, val in sk.items():
+                    if val is not None:
+                        msd_sum[k] = msd_sum.get(k, 0.0) + float(val)
+                msd_n += 1
+        msd_mean = {k: (v / msd_n) for k, v in msd_sum.items()} if msd_n else {}
+        # 本桶已游玩谱数（用于“当前涉足范围”可视化）
+        played_cnt = sum(1 for m in buckets.get(name, []) if m in valid_by_md5)
+        # 置信标志 provisional：仅当 .osu 源文件缺失（已删谱残留）导致 MM/技能向量算不出时才标记。
+        # 官方星(sr)在定级中根本不参与，故绝不作为判据（之前误纳入 -> 大量误报）。
+        prov = sum(1 for r in rows
+                   if (r.get("mm") is None or not r.get("mmSkills")))
         try:
             b = bstv2.name_value(name)
         except Exception:
@@ -462,22 +532,33 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
         bucket_accs = []
         for m in buckets.get(name, []):
             bucket_accs.extend(valid_by_md5.get(m, []))
+        # best-per-map 准确率（>=80%）—— 供“误差率箱线图”按桶绘制分布
+        acc_best = [per_map[m]["acc"] for m in buckets.get(name, [])
+                    if m in per_map and per_map[m].get("acc") is not None
+                    and per_map[m]["acc"] >= ACC_MIN]
         barr.append({
             "bucket": b, "name": name, "count": cnt,
-            "avgSr": (sum(srs) / len(srs)) if srs else 0.0,
-            "avgScaled": (sum(scs) / len(scs)) if scs else 0.0,
+            "avgSr": (sum(srs) / len(srs)) if srs else None,
+            "srMin": srs[0] if srs else None,
+            "srMed": srs[len(srs) // 2] if srs else None,
+            "srMax": srs[-1] if srs else None,
+            "avgScaled": (sum(scs) / len(scs)) if scs else None,
             "avgAcc": (sum(bucket_accs) / len(bucket_accs)) if bucket_accs else None,
+            "accBest": acc_best,
             "types": types,
+            "skills": skills_mean,
+            "msdSkills": msd_mean,
+            "playedCount": played_cnt,
+            "provisional": prov,
         })
 
-    # typePerf
+    # typePerf —— 用 best-per-map（全曲最佳），与误差率口径统一
     typeagg = {}
-    for s in sarr:
-        t = s["typ"] or "RC"
+    for s in best_scores:
+        t = s.get("typ") or "RC"
         d = typeagg.setdefault(t, [0, 0.0])
         d[0] += 1
-        if s["acc"] is not None:
-            d[1] += s["acc"]
+        d[1] += s["acc"]
     typePerf = [{"typ": t, "count": d[0], "avgAcc": (d[1] / d[0]) if d[0] else 0.0}
                 for t, d in sorted(typeagg.items())]
 
@@ -493,12 +574,62 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
             hi = (i + 1) * n // nb
             chunk = dated[lo:hi]
             accs = [c["acc"] for c in chunk if c["acc"] is not None]
+            comps = [c["comp"] for c in chunk if c.get("comp") is not None]
             progress.append({
                 "idx": i + 1,
                 "label": "%d-%d" % (lo + 1, hi),
                 "avgAcc": (sum(accs) / len(accs)) if accs else 0.0,
+                "avgComp": (sum(comps) / len(comps)) if comps else 0.0,
                 "count": len(chunk),
             })
+
+    # user skill profile: mean MM 6-skill vector over the whole 4K library vs over played maps
+    lib_sum = [0.0] * 6
+    lib_n = 0
+    prov_total = 0
+    for m, v in results.items():
+        if v.get("status") != "ok" or m not in realm_md5 or "bucket" not in v:
+            continue
+        if v.get("mm") is None or not v.get("mmSkills"):
+            prov_total += 1
+        ms = v.get("mmSkills")
+        if ms and len(ms) >= 6:
+            for i in range(6):
+                lib_sum[i] += ms[i]
+            lib_n += 1
+    library_profile = {SKILL_ABBR[i]: (lib_sum[i] / lib_n if lib_n else 0.0) for i in range(6)}
+    pl_sum = [0.0] * 6
+    pl_n = 0
+    for m in valid_by_md5:
+        v = results.get(m)
+        ms = v.get("mmSkills") if v else None
+        if ms and len(ms) >= 6:
+            for i in range(6):
+                pl_sum[i] += ms[i]
+            pl_n += 1
+    played_profile = {SKILL_ABBR[i]: (pl_sum[i] / pl_n if pl_n else 0.0) for i in range(6)}
+
+    # MinaCalc 8 技能集画像（全库 vs 已游玩）
+    MSD_ORDER = ["Overall", "Stream", "Jumpstream", "Handstream",
+                 "Stamina", "JackSpeed", "Chordjack", "Technical"]
+
+    def _msd_mean(md5_iter):
+        acc = {k: 0.0 for k in MSD_ORDER}
+        nn = 0
+        for m in md5_iter:
+            v = results.get(m)
+            sk = v.get("skills") if v else None
+            if isinstance(sk, dict) and sk:
+                for k in MSD_ORDER:
+                    if sk.get(k) is not None:
+                        acc[k] += float(sk[k])
+                nn += 1
+        return ({k: (acc[k] / nn if nn else 0.0) for k in MSD_ORDER}, nn)
+
+    lib_md5 = [m for m, v in results.items()
+               if v.get("status") == "ok" and m in realm_md5 and "bucket" in v]
+    msd_library, msd_lib_n = _msd_mean(lib_md5)
+    msd_played, msd_pl_n = _msd_mean(list(valid_by_md5.keys()))
 
     return {
         "generatedAt": now,
@@ -508,9 +639,21 @@ def build_report(results, beatmaps, scores, buckets, bucket_rows,
             "totalBeatmaps": total_beatmaps,
             "dbRegenerated": db_regen,
             "bucketChanges": bucket_changes,
+            "provisionalTotal": prov_total,
+        },
+        "skillNames": SKILL_ABBR,
+        "skillProfile": {
+            "library": library_profile, "libraryN": lib_n,
+            "played": played_profile, "playedN": pl_n,
+        },
+        "msdSkillNames": MSD_ORDER,
+        "msdSkillProfile": {
+            "library": msd_library, "libraryN": msd_lib_n,
+            "played": msd_played, "playedN": msd_pl_n,
         },
         "buckets": barr,
         "scores": sarr,
+        "bestScores": best_scores,
         "typePerf": typePerf,
         "progress": progress,
     }

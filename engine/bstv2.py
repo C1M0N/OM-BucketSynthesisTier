@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """BSTv2 = anchor(0.4*z(BST) + 0.6*z(MM))  —— BST(复合scaled) 与 MM(Map Minus) 的融合定级。
 冻结参数(z 标准化 + REFORM 全阶梯锚定)使单图分值稳定、不随库增减漂移。
-命名: [4k] 前缀;0..9 阿拉伯, 10..18 罗马 X..XVIII, 各带 '+' 半桶;>=19 -> Z(避免 XIX 破坏字典序)。"""
+命名: [4k] 前缀;0..9 阿拉伯, 10..18 罗马 X..XVIII, 19 -> Y, 20 -> Z, 各带 '+' 半桶;
+>=21 -> ℵ 封顶(均避免 XIX 等破坏字典序)。"""
 import math, json, os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,27 +32,41 @@ def bucket_of(x):
 _ROMAN = {10: "X", 11: "XI", 12: "XII", 13: "XIII", 14: "XIV",
           15: "XV", 16: "XVI", 17: "XVII", 18: "XVIII"}
 
+_ALEPH = "ℵ"  # ℵ：>=21 封顶（不再细分 +）
+
 def bucket_name(b):
     """0.5 宽桶 -> [4k] 命名。"""
     if b < 0: b = 0.0
     i = int(math.floor(b))
     half = (b - i) >= 0.5
-    if i >= 19:
-        return "[4k]Z"
-    core = str(i) if i <= 9 else _ROMAN[i]
+    if i >= 21:
+        return "[4k]" + _ALEPH
+    if i == 19:
+        core = "Y"
+    elif i == 20:
+        core = "Z"
+    elif i <= 9:
+        core = str(i)
+    else:
+        core = _ROMAN[i]
     return "[4k]" + core + ("+" if half else "")
 
 def name_value(name):
     """逆映射: [4k] 名 -> 桶下界数值(供报告排序)。"""
     s = name.replace("[4k]", "")
-    if s == "Z": return 19.0
+    if s == _ALEPH: return 21.0
     half = s.endswith("+")
     if half: s = s[:-1]
-    inv = {v: k for k, v in _ROMAN.items()}
-    base = inv.get(s, None)
-    if base is None:
-        try: base = int(s)
-        except Exception: base = 0
+    if s == "Y":
+        base = 19
+    elif s == "Z":
+        base = 20
+    else:
+        inv = {v: k for k, v in _ROMAN.items()}
+        base = inv.get(s, None)
+        if base is None:
+            try: base = int(s)
+            except Exception: base = 0
     return base + (0.5 if half else 0.0)
 
 def freeze_params(bst_list, mm_list, reform_pairs):

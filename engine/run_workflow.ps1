@@ -6,6 +6,7 @@ param(
   [switch]$ReportOnly,        # 只重出报告，不重算/重建 db
   [switch]$Force,             # 强制重建 collection.db（删除现有 engine/collection.db）
   [switch]$ResetBaseline,     # 删除 .baseline_4k.json，让 newMaps 反映“本次真正新增”
+  [switch]$Auto,              # 定时任务调用时加此开关：归档文件名前缀用 a（手动则为 m）
   [string[]]$PassArgs = @()   # 透传给 run_4k.py 的参数（如 --max-new=50）
 )
 $ErrorActionPreference = "Stop"
@@ -97,5 +98,14 @@ if ($LASTEXITCODE -ne 0) { Log "make_report.py 失败 (exit $LASTEXITCODE)"; exi
 $rep = Join-Path $HERE "report.pdf"
 $db  = Join-Path $HERE "collection.db"
 if (Test-Path $rep) { Copy-Item $rep (Join-Path $DELIVER "4k_report.pdf") -Force; Log "-> 4k_report.pdf" }
+# 增量归档：report\4k-{m|a}YYMMDDHHMM.pdf （m=手动, a=定时自动；每次保留一份，不覆盖）
+if (Test-Path $rep) {
+  $REPDIR = Join-Path $DELIVER "report"
+  New-Item -ItemType Directory -Force $REPDIR | Out-Null
+  $tag = if ($Auto) { "a" } else { "m" }
+  $arch = Join-Path $REPDIR ("4k-" + $tag + (Get-Date -Format "yyMMddHHmm") + ".pdf")
+  Copy-Item $rep $arch -Force
+  Log ("-> archive: report\" + (Split-Path $arch -Leaf))
+}
 if (Test-Path $db)  { Copy-Item $db  (Join-Path $DELIVER "4k_collections.db") -Force; Log "-> 4k_collections.db" }
 Log "DONE. 日志: $LOG"
